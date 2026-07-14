@@ -1,0 +1,45 @@
+[
+  {
+    "name": "group_message",
+    "fixture": {
+      "name": "group_message",
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "telegram",
+      "credential": {
+        "account_id": "123456",
+        "bot_id": "123456",
+        "bot_token": "123456:ABCdef-test-token"
+      },
+      "account_state": {
+        "bot_id": "123456",
+        "bot_username": "testbot"
+      },
+      "raw": {
+        "update_id": 2,
+        "message": {
+          "message_id": 102,
+          "from": {
+            "id": 999,
+            "is_bot": false,
+            "first_name": "User"
+          },
+          "chat": {
+            "id": -200,
+            "type": "group"
+          },
+          "text": "hello group"
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "group",
+      "chat_id": "-200",
+      "sender_id": "999",
+      "text": "hello group",
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  }
+]

@@ -1,0 +1,330 @@
+package beaktelegram
+
+import (
+	"context"
+	"net/http"
+	"strconv"
+	"testing"
+
+	"github.com/TrueWatch/beak-agent-channel-telegram/sdk"
+)
+
+func TestConnectorImplementsInterface(t *testing.T) {
+	var _ sdk.Connector = NewConnector()
+}
+
+func TestConnectorMetadata(t *testing.T) {
+	meta := NewConnector().Metadata()
+	if meta.ID != ID {
+		t.Fatalf("id=%q want %q", meta.ID, ID)
+	}
+	if meta.Platform != Platform {
+		t.Fatalf("platform=%q want %q", meta.Platform, Platform)
+	}
+	if meta.Label != "Telegram" {
+		t.Fatalf("label=%q want %q", meta.Label, "Telegram")
+	}
+	if !meta.Capabilities.Text {
+		t.Fatal("expected text capability")
+	}
+}
+
+func TestConnectorCredentialSchema(t *testing.T) {
+	schema := NewConnector().CredentialSchema(context.Background())
+	if schema.Type != "object" {
+		t.Fatalf("type=%q", schema.Type)
+	}
+	if schema.AdditionalProperties {
+		t.Fatal("additionalProperties must be false")
+	}
+	if _, ok := schema.Properties["bot_token"]; !ok {
+		t.Fatalf("missing credential field bot_token")
+	}
+	if !schema.Properties["bot_token"].Secret {
+		t.Fatalf("bot_token must be marked secret")
+	}
+	if _, ok := schema.Properties["webhook_secret"]; !ok {
+		t.Fatalf("missing credential field webhook_secret")
+	}
+	// Must not leak backend-only fields.
+	for _, banned := range []string{"base_url", "callback_url", "webhook_url", "offset", "bot_id"} {
+		if _, ok := schema.Properties[banned]; ok {
+			t.Fatalf("credential schema leaks backend field %q", banned)
+		}
+	}
+}
+
+func TestValidateCredential_Success(t *testing.T) {
+	c := Connector{}
+	res, err := c.ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": testBotToken},
+		Runtime:    sdk.Runtime{HTTPClient: httpClientReturning(getMeOK())},
+	})
+	if err != nil {
+		t.Fatalf("unexpected go error: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected Valid=true, got error %q", res.Error)
+	}
+	if res.AccountKey != testBotIDStr {
+		t.Fatalf("account key=%q want %q", res.AccountKey, testBotIDStr)
+	}
+	if res.State["bot_id"] != testBotIDStr {
+		t.Fatalf("bot_id not persisted to state: %#v", res.State)
+	}
+}
+
+func TestValidateCredential_InvalidToken(t *testing.T) {
+	c := Connector{}
+	res, err := c.ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": "bad"},
+		Runtime:    sdk.Runtime{HTTPClient: httpClientReturning(map[string]any{"ok": false})},
+	})
+	if err != nil {
+		t.Fatalf("invalid token must not return a Go error, got %v", err)
+	}
+	if res.Valid {
+		t.Fatal("expected Valid=false")
+	}
+	if res.Error == "" {
+		t.Fatal("expected Error to be populated")
+	}
+}
+
+func TestValidateCredential_HTTPClientInjected(t *testing.T) {
+	var sawPath string
+	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		sawPath = req.URL.Path
+		return testJSONResponseObj(getMeOK())
+	})}
+	c := Connector{}
+	if _, err := c.ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": testBotToken},
+		Runtime:    sdk.Runtime{HTTPClient: client},
+	}); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	wantSuffix := "/bot" + testBotToken + "/getMe"
+	if sawPath != wantSuffix {
+		t.Fatalf("expected path %q, saw %q", wantSuffix, sawPath)
+	}
+}
+
+// inbound drives a single update through HandleWebhook and returns the result.
+func inbound(t *testing.T, b telegramUpdateBuilder) *EventResult {
+	t.Helper()
+	c := Connector{}
+	res, err := c.HandleWebhook(
+		context.Background(),
+		makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()),
+		sdkAccount("acct-1"),
+		b.bytes(),
+	)
+	if err != nil {
+		t.Fatalf("handle webhook: %v", err)
+	}
+	return res
+}
+
+func TestInbound_DirectText(t *testing.T) {
+	res := inbound(t, telegramUpdateBuilder{
+		UpdateID: 1, MessageID: 101, ChatID: 100, ChatType: "private",
+		FromID: 999, Text: "hi",
+	})
+	if res.Ignored {
+		t.Fatalf("unexpected ignore: %q", res.Reason)
+	}
+	if res.Inbound == nil || res.Inbound.ChatType != sdk.ChatTypeDirect {
+		t.Fatalf("expected direct chat, got %#v", res.Inbound)
+	}
+}
+
+func TestInbound_GroupText(t *testing.T) {
+	res := inbound(t, telegramUpdateBuilder{
+		UpdateID: 2, MessageID: 102, ChatID: -200, ChatType: "group",
+		FromID: 999, Text: "hello group",
+	})
+	if res.Ignored || res.Inbound.ChatType != sdk.ChatTypeGroup {
+		t.Fatalf("expected group chat, got ignored=%v %#v", res.Ignored, res.Inbound)
+	}
+}
+
+func TestInbound_SupergroupText(t *testing.T) {
+	res := inbound(t, telegramUpdateBuilder{
+		UpdateID: 3, MessageID: 103, ChatID: -300, ChatType: "supergroup",
+		FromID: 999, Text: "hello supergroup",
+	})
+	if res.Ignored || res.Inbound.ChatType != sdk.ChatTypeGroup {
+		t.Fatalf("expected group chat for supergroup, got ignored=%v %#v", res.Ignored, res.Inbound)
+	}
+}
+
+func TestInbound_SelfEchoIgnored(t *testing.T) {
+	// From.ID == bot ID → self echo
+	res := inbound(t, telegramUpdateBuilder{
+		UpdateID: 4, MessageID: 104, ChatID: -200, ChatType: "group",
+		FromID: testBotID, Text: "echo",
+	})
+	if !res.Ignored || res.Reason != "self_echo" {
+		t.Fatalf("expected self_echo ignore, got ignored=%v reason=%q", res.Ignored, res.Reason)
+	}
+}
+
+func TestInbound_BotFlagIgnored(t *testing.T) {
+	// From.IsBot=true → self echo
+	res := inbound(t, telegramUpdateBuilder{
+		UpdateID: 5, MessageID: 105, ChatID: -200, ChatType: "group",
+		FromID: 777, FromIsBot: true, Text: "bot message",
+	})
+	if !res.Ignored || res.Reason != "self_echo" {
+		t.Fatalf("expected self_echo for is_bot, got ignored=%v reason=%q", res.Ignored, res.Reason)
+	}
+}
+
+func TestInbound_NonTextIgnored(t *testing.T) {
+	// Empty text → unsupported_message_type
+	res := inbound(t, telegramUpdateBuilder{
+		UpdateID: 6, MessageID: 106, ChatID: -200, ChatType: "group",
+		FromID: 999, Text: "",
+	})
+	if !res.Ignored || res.Reason != "unsupported_message_type" {
+		t.Fatalf("expected non-text ignore, got ignored=%v reason=%q", res.Ignored, res.Reason)
+	}
+}
+
+func TestInbound_DuplicateIgnored(t *testing.T) {
+	c := Connector{}
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore())
+	account := sdkAccount("acct-1")
+	body := telegramUpdateBuilder{
+		UpdateID: 7, MessageID: 107, ChatID: -200, ChatType: "group",
+		FromID: 999, Text: "hi",
+	}.bytes()
+	if _, err := c.HandleWebhook(context.Background(), rt, account, body); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	res, err := c.HandleWebhook(context.Background(), rt, account, body)
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if !res.Ignored || res.Reason != "duplicate" {
+		t.Fatalf("expected duplicate ignore, got ignored=%v reason=%q", res.Ignored, res.Reason)
+	}
+}
+
+func TestInbound_NoMessage_Ignored(t *testing.T) {
+	// Update with no message field → ignored
+	c := Connector{}
+	body := []byte(`{"update_id":8}`)
+	res, err := c.HandleWebhook(context.Background(), makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()), sdkAccount("acct-1"), body)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if !res.Ignored {
+		t.Fatalf("expected ignored for update with no message, got %+v", res)
+	}
+}
+
+func TestInbound_SavesState(t *testing.T) {
+	c := Connector{}
+	store := newFakeSDKAccountStore()
+	body := telegramUpdateBuilder{
+		UpdateID: 9, MessageID: 109, ChatID: -200, ChatType: "group",
+		FromID: 999, Text: "hi",
+	}.bytes()
+	if _, err := c.HandleWebhook(context.Background(), makeRuntime(&fakeSDKGateway{}, store), sdkAccount("acct-1"), body); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	saved, _ := store.LoadChannelAccountState(context.Background(), "acct-1")
+	peer, _ := saved["peer_sessions"].(map[string]any)
+	seen, _ := saved["inbound_seen"].(map[string]any)
+	if len(peer) == 0 || len(seen) == 0 {
+		t.Fatalf("expected peer_sessions and inbound_seen persisted, got %#v", saved)
+	}
+}
+
+func TestSend_Text(t *testing.T) {
+	c := Connector{}
+	account := sdkAccount("acct-1")
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
+	rt.HTTPClient = httpClientReturning(sendMessageOK(555))
+	res, err := c.Send(context.Background(), rt, sdk.OutboundMessage{AccountUUID: "acct-1", ChatID: "-200", Text: "hi"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if res.MessageID != strconv.FormatInt(555, 10) {
+		t.Fatalf("message id=%q want 555", res.MessageID)
+	}
+}
+
+func TestSend_MissingChatID(t *testing.T) {
+	c := Connector{}
+	account := sdkAccount("acct-1")
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
+	if _, err := c.Send(context.Background(), rt, sdk.OutboundMessage{AccountUUID: "acct-1", Text: "hi"}); err == nil {
+		t.Fatal("expected error for missing chat_id")
+	}
+}
+
+func TestSend_MissingAccount(t *testing.T) {
+	c := Connector{}
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore())
+	if _, err := c.Send(context.Background(), rt, sdk.OutboundMessage{AccountUUID: "ghost", ChatID: "-200", Text: "hi"}); err == nil {
+		t.Fatal("expected error for unknown account")
+	}
+}
+
+func TestWebhookSecurity_ValidSecret(t *testing.T) {
+	c := Connector{}
+	body := telegramUpdateBuilder{
+		UpdateID: 10, MessageID: 110, ChatID: -200, ChatType: "group",
+		FromID: 999, Text: "hi",
+	}.bytes()
+	req := signedWebhookRequest(testWebhookSecret, body)
+	resp, err := c.HandleWebhookRequest(context.Background(), makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()), sdkAccount("acct-1"), req)
+	if err != nil {
+		t.Fatalf("valid secret rejected: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+}
+
+func TestWebhookSecurity_TamperedSecret(t *testing.T) {
+	c := Connector{}
+	body := telegramUpdateBuilder{
+		UpdateID: 11, MessageID: 111, ChatID: -200, ChatType: "group",
+		FromID: 999, Text: "hi",
+	}.bytes()
+	req := signedWebhookRequest("wrong-secret", body)
+	if _, err := c.HandleWebhookRequest(context.Background(), makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()), sdkAccount("acct-1"), req); err == nil {
+		t.Fatal("expected error for tampered secret")
+	}
+}
+
+func TestWebhookSecurity_NoSecret_Passes(t *testing.T) {
+	// When no webhook_secret is configured, requests without the header pass.
+	c := Connector{}
+	account := sdk.ChannelAccount{
+		UUID:     "acct-no-secret",
+		Platform: Platform,
+		Credential: map[string]any{
+			"account_id": testBotIDStr,
+			"bot_id":     testBotIDStr,
+			"bot_token":  testBotToken,
+			// no webhook_secret
+		},
+	}
+	body := telegramUpdateBuilder{
+		UpdateID: 12, MessageID: 112, ChatID: -200, ChatType: "group",
+		FromID: 999, Text: "hi",
+	}.bytes()
+	req := signedWebhookRequest("", body) // no secret header
+	resp, err := c.HandleWebhookRequest(context.Background(), makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()), account, req)
+	if err != nil {
+		t.Fatalf("no secret configured, request should pass: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+}

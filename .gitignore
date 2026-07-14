@@ -1,0 +1,40 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# Build output of examples/* (go build with no -o)
+/examples/basic/basic
+/examples/smoke/smoke
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace files (keep per-clone builds reproducible)
+go.work
+go.work.sum
+
+# Vendored dependencies (module mode; re-fetched from go.sum)
+/vendor/
+
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+
+# Local tooling indexes and caches
+.codegraph/
+
+# Editor / IDE
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Claude Code local config and tooling index
+.claude/
