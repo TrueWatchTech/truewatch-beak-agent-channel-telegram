@@ -1,0 +1,22 @@
+[
+  {
+    "name": "processing_reaction",
+    "request": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "123456",
+      "platform": "telegram",
+      "chat_type": "group",
+      "chat_id": "-200",
+      "target_message_id": "102",
+      "mode": "reaction",
+      "action": "start",
+      "intent": "processing"
+    },
+    "expect": {
+      "status": "sent",
+      "mode": "reaction",
+      "reaction_id": "👀"
+    }
+  }
+]

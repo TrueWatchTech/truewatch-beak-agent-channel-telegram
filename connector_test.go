@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/TrueWatch/beak-agent-channel-telegram/sdk"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-telegram/sdk"
 )
 
 func TestConnectorImplementsInterface(t *testing.T) {
@@ -46,6 +46,16 @@ func TestConnectorCredentialSchema(t *testing.T) {
 	if _, ok := schema.Properties["webhook_secret"]; !ok {
 		t.Fatalf("missing credential field webhook_secret")
 	}
+	if !schema.Properties["webhook_secret"].Secret {
+		t.Fatalf("webhook_secret must be marked secret")
+	}
+	required := make(map[string]bool, len(schema.Required))
+	for _, field := range schema.Required {
+		required[field] = true
+	}
+	if !required["bot_token"] || !required["webhook_secret"] {
+		t.Fatalf("required=%v must include bot_token and webhook_secret", schema.Required)
+	}
 	// Must not leak backend-only fields.
 	for _, banned := range []string{"base_url", "callback_url", "webhook_url", "offset", "bot_id"} {
 		if _, ok := schema.Properties[banned]; ok {
@@ -57,7 +67,7 @@ func TestConnectorCredentialSchema(t *testing.T) {
 func TestValidateCredential_Success(t *testing.T) {
 	c := Connector{}
 	res, err := c.ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
-		Credential: map[string]any{"bot_token": testBotToken},
+		Credential: map[string]any{"bot_token": testBotToken, "webhook_secret": testWebhookSecret},
 		Runtime:    sdk.Runtime{HTTPClient: httpClientReturning(getMeOK())},
 	})
 	if err != nil {
@@ -74,11 +84,27 @@ func TestValidateCredential_Success(t *testing.T) {
 	}
 }
 
+func TestValidateCredential_NormalizesCredentialWhitespace(t *testing.T) {
+	res, err := (Connector{}).ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{
+			"bot_token":      "  " + testBotToken + "  ",
+			"webhook_secret": "  " + testWebhookSecret + "  ",
+		},
+		Runtime: sdk.Runtime{HTTPClient: httpClientReturning(getMeOK())},
+	})
+	if err != nil || res == nil || !res.Valid {
+		t.Fatalf("result=%#v err=%v", res, err)
+	}
+	if res.Credential["bot_token"] != testBotToken || res.Credential["webhook_secret"] != testWebhookSecret {
+		t.Fatalf("credential was not normalized: %#v", res.Credential)
+	}
+}
+
 func TestValidateCredential_InvalidToken(t *testing.T) {
 	c := Connector{}
 	res, err := c.ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
-		Credential: map[string]any{"bot_token": "bad"},
-		Runtime:    sdk.Runtime{HTTPClient: httpClientReturning(map[string]any{"ok": false})},
+		Credential: map[string]any{"bot_token": "bad", "webhook_secret": testWebhookSecret},
+		Runtime:    sdk.Runtime{HTTPClient: httpClientReturning(map[string]any{"ok": false, "error_code": 401, "description": "Unauthorized"})},
 	})
 	if err != nil {
 		t.Fatalf("invalid token must not return a Go error, got %v", err)
@@ -99,7 +125,7 @@ func TestValidateCredential_HTTPClientInjected(t *testing.T) {
 	})}
 	c := Connector{}
 	if _, err := c.ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
-		Credential: map[string]any{"bot_token": testBotToken},
+		Credential: map[string]any{"bot_token": testBotToken, "webhook_secret": testWebhookSecret},
 		Runtime:    sdk.Runtime{HTTPClient: client},
 	}); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -107,6 +133,45 @@ func TestValidateCredential_HTTPClientInjected(t *testing.T) {
 	wantSuffix := "/bot" + testBotToken + "/getMe"
 	if sawPath != wantSuffix {
 		t.Fatalf("expected path %q, saw %q", wantSuffix, sawPath)
+	}
+}
+
+func TestValidateCredential_TransientErrorRetriesThenReturnsGoError(t *testing.T) {
+	attempts := 0
+	client := &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		return nil, context.DeadlineExceeded
+	})}
+	result, err := (Connector{}).ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": testBotToken, "webhook_secret": testWebhookSecret},
+		Runtime:    sdk.Runtime{HTTPClient: client},
+	})
+	if err == nil || result != nil {
+		t.Fatalf("transient failure result=%#v err=%v", result, err)
+	}
+	if attempts != credentialAttempts {
+		t.Fatalf("attempts=%d want %d", attempts, credentialAttempts)
+	}
+}
+
+func TestValidateCredential_TransientErrorCanRecover(t *testing.T) {
+	attempts := 0
+	client := &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		return testJSONResponseObj(getMeOK())
+	})}
+	result, err := (Connector{}).ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": testBotToken, "webhook_secret": testWebhookSecret},
+		Runtime:    sdk.Runtime{HTTPClient: client},
+	})
+	if err != nil || result == nil || !result.Valid {
+		t.Fatalf("recovered result=%#v err=%v", result, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d want 2", attempts)
 	}
 }
 
@@ -170,14 +235,14 @@ func TestInbound_SelfEchoIgnored(t *testing.T) {
 	}
 }
 
-func TestInbound_BotFlagIgnored(t *testing.T) {
-	// From.IsBot=true → self echo
+func TestInbound_OtherBotAccepted(t *testing.T) {
+	// is_bot alone is not self-echo: Telegram groups can contain other bots.
 	res := inbound(t, telegramUpdateBuilder{
 		UpdateID: 5, MessageID: 105, ChatID: -200, ChatType: "group",
 		FromID: 777, FromIsBot: true, Text: "bot message",
 	})
-	if !res.Ignored || res.Reason != "self_echo" {
-		t.Fatalf("expected self_echo for is_bot, got ignored=%v reason=%q", res.Ignored, res.Reason)
+	if res.Ignored || res.Inbound == nil || res.Inbound.SenderID != "777" {
+		t.Fatalf("expected other bot message to pass, got ignored=%v reason=%q inbound=%#v", res.Ignored, res.Reason, res.Inbound)
 	}
 }
 
@@ -248,7 +313,7 @@ func TestSend_Text(t *testing.T) {
 	account := sdkAccount("acct-1")
 	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
 	rt.HTTPClient = httpClientReturning(sendMessageOK(555))
-	res, err := c.Send(context.Background(), rt, sdk.OutboundMessage{AccountUUID: "acct-1", ChatID: "-200", Text: "hi"})
+	res, err := c.Send(context.Background(), rt, sdk.OutboundMessage{AccountUUID: "acct-1", MessageUUID: "message-1", ChatID: "-200", Text: "hi"})
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -302,8 +367,7 @@ func TestWebhookSecurity_TamperedSecret(t *testing.T) {
 	}
 }
 
-func TestWebhookSecurity_NoSecret_Passes(t *testing.T) {
-	// When no webhook_secret is configured, requests without the header pass.
+func TestWebhookSecurity_NoSecret_IsRejected(t *testing.T) {
 	c := Connector{}
 	account := sdk.ChannelAccount{
 		UUID:     "acct-no-secret",
@@ -320,11 +384,7 @@ func TestWebhookSecurity_NoSecret_Passes(t *testing.T) {
 		FromID: 999, Text: "hi",
 	}.bytes()
 	req := signedWebhookRequest("", body) // no secret header
-	resp, err := c.HandleWebhookRequest(context.Background(), makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()), account, req)
-	if err != nil {
-		t.Fatalf("no secret configured, request should pass: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d", resp.StatusCode)
+	if _, err := c.HandleWebhookRequest(context.Background(), makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()), account, req); err == nil {
+		t.Fatal("missing configured webhook secret must be rejected")
 	}
 }

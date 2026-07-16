@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/TrueWatch/beak-agent-channel-telegram/sdk"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-telegram/sdk"
 )
 
 const (

@@ -19,7 +19,7 @@
 //
 // Telegram operator steps:
 //  1. Create a bot via @BotFather; copy its token -> BEAK_BOT_TOKEN.
-//  2. Optionally choose a random secret string -> BEAK_WEBHOOK_SECRET.
+//  2. Choose a random secret string -> BEAK_WEBHOOK_SECRET.
 //  3. Run `smoke validate` — proves the token via getMe.
 //  4. Run `smoke serve :8080` and expose it publicly (e.g. `ngrok http 8080`).
 //  5. Point Telegram at it:
@@ -38,8 +38,8 @@ import (
 	"strings"
 	"sync"
 
-	beak "github.com/TrueWatch/beak-agent-channel-telegram"
-	"github.com/TrueWatch/beak-agent-channel-telegram/sdk"
+	beak "github.com/TrueWatchTech/truewatch-beak-agent-channel-telegram"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-telegram/sdk"
 )
 
 // credentialFieldSpec mirrors one entry of platforms/telegram.yaml's
@@ -53,7 +53,7 @@ type credentialFieldSpec struct {
 
 var credentialFields = []credentialFieldSpec{
 	{Key: "bot_token", Title: "Bot Token", Required: true},
-	{Key: "webhook_secret", Title: "Webhook Secret Token", Required: false},
+	{Key: "webhook_secret", Title: "Webhook Secret Token", Required: true},
 }
 
 // envVarName derives the environment variable name for a credential key, e.g.

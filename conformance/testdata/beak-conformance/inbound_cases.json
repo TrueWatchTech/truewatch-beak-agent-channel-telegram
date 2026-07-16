@@ -41,5 +41,327 @@
       "require_dedupe_key": true,
       "require_message_id": true
     }
+  },
+  {
+    "name": "direct_message_identity",
+    "fixture": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "telegram",
+      "credential": {
+        "account_id": "123456",
+        "bot_id": "123456",
+        "bot_token": "123456:ABCdef-test-token"
+      },
+      "account_state": {
+        "bot_id": "123456",
+        "bot_username": "testbot"
+      },
+      "raw": {
+        "update_id": 3,
+        "message": {
+          "message_id": 103,
+          "from": {
+            "id": 998,
+            "first_name": "Alice",
+            "last_name": "Wu"
+          },
+          "chat": {
+            "id": 998,
+            "type": "private",
+            "first_name": "Alice",
+            "last_name": "Wu"
+          },
+          "text": "hello bot"
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "direct",
+      "chat_id": "998",
+      "chat_display_name": "Alice Wu",
+      "chat_identity_id": "998",
+      "sender_id": "998",
+      "sender_display_name": "Alice Wu",
+      "text": "hello bot",
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  },
+  {
+    "name": "pure_bot_mention_follow_up",
+    "fixture": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "telegram",
+      "credential": {
+        "account_id": "123456",
+        "bot_id": "123456",
+        "bot_token": "123456:ABCdef-test-token"
+      },
+      "account_state": {
+        "bot_id": "123456",
+        "bot_username": "testbot"
+      },
+      "raw": {
+        "update_id": 4,
+        "message": {
+          "message_id": 104,
+          "from": {
+            "id": 997,
+            "first_name": "Bob"
+          },
+          "chat": {
+            "id": -200,
+            "type": "group",
+            "title": "Ops"
+          },
+          "text": "@testbot",
+          "entities": [
+            {
+              "type": "mention",
+              "offset": 0,
+              "length": 8
+            }
+          ]
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "group",
+      "chat_id": "-200",
+      "chat_display_name": "Ops",
+      "sender_id": "997",
+      "text_trimmed_empty": true,
+      "mentioned_me": true,
+      "mention_ids": [
+        "testbot"
+      ],
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  },
+  {
+    "name": "topic_reply",
+    "fixture": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "telegram",
+      "credential": {
+        "account_id": "123456",
+        "bot_id": "123456",
+        "bot_token": "123456:ABCdef-test-token"
+      },
+      "account_state": {
+        "bot_id": "123456",
+        "bot_username": "testbot"
+      },
+      "raw": {
+        "update_id": 5,
+        "message": {
+          "message_id": 105,
+          "message_thread_id": 77,
+          "from": {
+            "id": 996,
+            "first_name": "Carol"
+          },
+          "chat": {
+            "id": -201,
+            "type": "supergroup",
+            "title": "Incidents"
+          },
+          "text": "what happened?",
+          "reply_to_message": {
+            "message_id": 99,
+            "message_thread_id": 77,
+            "from": {
+              "id": 995,
+              "first_name": "Dave"
+            },
+            "chat": {
+              "id": -201,
+              "type": "supergroup",
+              "title": "Incidents"
+            },
+            "text": "original incident"
+          }
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "group",
+      "chat_id": "-201",
+      "thread_id": "77",
+      "chat_display_name": "Incidents",
+      "sender_id": "996",
+      "sender_display_name": "Carol",
+      "text": "what happened?",
+      "referenced_message": {
+        "platform": "telegram",
+        "message_id": "99",
+        "chat_type": "group",
+        "chat_id": "-201",
+        "thread_id": "77",
+        "sender_id": "995",
+        "sender_display_name": "Dave",
+        "message_type": "text",
+        "text": "original incident",
+        "require_text": true
+      },
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  },
+  {
+    "name": "captioned_photo",
+    "fixture": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "telegram",
+      "credential": {
+        "account_id": "123456",
+        "bot_id": "123456",
+        "bot_token": "123456:ABCdef-test-token"
+      },
+      "account_state": {
+        "bot_id": "123456",
+        "bot_username": "testbot"
+      },
+      "raw": {
+        "update_id": 6,
+        "message": {
+          "message_id": 106,
+          "from": {
+            "id": 994,
+            "first_name": "Eve"
+          },
+          "chat": {
+            "id": -202,
+            "type": "group",
+            "title": "Images"
+          },
+          "caption": "inspect this",
+          "photo": [
+            {
+              "file_id": "photo-1",
+              "width": 10,
+              "height": 10
+            }
+          ]
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "group",
+      "chat_id": "-202",
+      "sender_id": "994",
+      "text": "inspect this",
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  },
+  {
+    "name": "business_message_preserves_connection_identity",
+    "fixture": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "telegram",
+      "credential": {
+        "account_id": "123456",
+        "bot_id": "123456",
+        "bot_token": "123456:ABCdef-test-token"
+      },
+      "account_state": {
+        "bot_id": "123456",
+        "bot_username": "testbot"
+      },
+      "raw": {
+        "update_id": 7,
+        "business_message": {
+          "message_id": 107,
+          "business_connection_id": "bc:1",
+          "from": {
+            "id": 993,
+            "first_name": "Customer"
+          },
+          "chat": {
+            "id": 4242,
+            "type": "private",
+            "first_name": "Customer"
+          },
+          "text": "need help"
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "direct",
+      "chat_id": "business:YmM6MQ:4242",
+      "chat_identity_id": "business:YmM6MQ:4242",
+      "sender_id": "993",
+      "sender_display_name": "Customer",
+      "text": "need help",
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  },
+  {
+    "name": "direct_messages_topic_uses_common_chat_and_thread",
+    "fixture": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "telegram",
+      "credential": {
+        "account_id": "123456",
+        "bot_id": "123456",
+        "bot_token": "123456:ABCdef-test-token",
+        "webhook_secret": "test-webhook-secret"
+      },
+      "account_state": {
+        "bot_id": "123456",
+        "bot_username": "testbot"
+      },
+      "raw": {
+        "update_id": 8,
+        "message": {
+          "message_id": 108,
+          "from": {
+            "id": 992,
+            "first_name": "Direct User"
+          },
+          "chat": {
+            "id": -900,
+            "type": "channel",
+            "title": "Support",
+            "is_direct_messages": true
+          },
+          "direct_messages_topic": {
+            "topic_id": 88,
+            "user": {
+              "id": 992,
+              "first_name": "Direct User"
+            }
+          },
+          "text": "direct question"
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "direct",
+      "chat_id": "direct_messages:88:-900",
+      "thread_id": "direct_messages:88",
+      "chat_display_name": "Support",
+      "chat_identity_id": "direct_messages:88:-900",
+      "sender_id": "992",
+      "sender_display_name": "Direct User",
+      "text": "direct question",
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
   }
 ]
