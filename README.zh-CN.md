@@ -36,18 +36,24 @@ func main() {
 | Key | 名称 | Secret | 必填 |
 | --- | --- | --- | --- |
 | `bot_token` | Bot Token | 是 | 是 |
-| `webhook_secret` | Webhook Secret Token | 是 | 是 |
 
-后端字段（base URL、回调地址、offset、token 缓存）不会出现在表单中。
+`webhook_secret` 不再由用户或前端生成。`ValidateCredential` 在 bot token
+校验成功后使用加密安全随机数生成该值，并通过返回的 credential 交给 Beak
+加密持久化。已有账号中合法的 secret 会继续沿用，不会在重启时轮换。
+
+后端字段（base URL、回调地址、webhook secret、offset、token 缓存）不会出现在表单中。
 
 ## 入站投递
 
 模式：**webhook**。当前 SDK 不启动 `getUpdates` 轮询。
 
-由 Beak host 持有 HTTP endpoint，并将原始请求转交给 `HandleWebhookRequest`，
-由其完成验签与事件解析。调用 Telegram `setWebhook` 时必须配置同一个
-`webhook_secret`，Telegram 会通过 `X-Telegram-Bot-Api-Secret-Token`
-请求头回传，SDK 会在解析 Update 前校验。启用 webhook 后，不要再为同一个
+由 Beak host 持有 HTTP endpoint，并通过 `sdk.Runtime.Webhook.URL` 把当前账号的
+绝对 HTTPS 地址显式传给 SDK。`Start` 使用已持久化的 `bot_token` 和
+`webhook_secret` 调用 Telegram `setWebhook`；每次 runtime 启动都会幂等注册，
+因此服务重启或 runtime 迁移后不需要人工操作。Telegram 随后通过
+`X-Telegram-Bot-Api-Secret-Token` 请求头回传 secret，SDK 会在解析 Update 前
+校验。host 未提供绝对 HTTPS URL 或账号缺失 secret 时，`Start` 会明确失败，
+不会把未注册 webhook 的账号标记为正常运行。启用 webhook 后，不要再为同一个
 bot 启用 `getUpdates`。
 
 支持的入站类型：

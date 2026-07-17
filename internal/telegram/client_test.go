@@ -98,6 +98,51 @@ func TestClientValidate_HTTPError(t *testing.T) {
 	}
 }
 
+func TestClientSetWebhook(t *testing.T) {
+	var sawPath string
+	var payload map[string]any
+	httpClient := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		sawPath = req.URL.Path
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		return jsonResp(`{"ok":true,"result":true}`)
+	})}
+	client := NewClient("", map[string]string{"bot_token": "123456:ABCdef"})
+	client.HTTPClient = httpClient
+
+	err := client.SetWebhook(context.Background(), "https://beak.example/api/v1/channel-webhooks/telegram/acct-1", "generated_secret-1")
+	if err != nil {
+		t.Fatalf("SetWebhook: %v", err)
+	}
+	if sawPath != "/bot123456:ABCdef/setWebhook" {
+		t.Fatalf("path=%q", sawPath)
+	}
+	if payload["url"] != "https://beak.example/api/v1/channel-webhooks/telegram/acct-1" || payload["secret_token"] != "generated_secret-1" {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func TestClientSetWebhookRejectsInvalidRuntimeConfiguration(t *testing.T) {
+	client := NewClient("", map[string]string{"bot_token": "123456:ABCdef"})
+	for _, tc := range []struct {
+		name   string
+		url    string
+		secret string
+	}{
+		{name: "missing URL", secret: "secret"},
+		{name: "relative URL", url: "/callback", secret: "secret"},
+		{name: "insecure URL", url: "http://beak.example/callback", secret: "secret"},
+		{name: "missing secret", url: "https://beak.example/callback"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := client.SetWebhook(context.Background(), tc.url, tc.secret); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
 func TestClientSendText(t *testing.T) {
 	var sawPath string
 	httpClient := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {

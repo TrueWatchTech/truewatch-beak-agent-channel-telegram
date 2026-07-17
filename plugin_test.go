@@ -30,19 +30,15 @@ func TestPluginSettingsSchema(t *testing.T) {
 	if _, ok := schema.Properties["bot_token"]; !ok {
 		t.Fatalf("settings schema missing field bot_token")
 	}
-	if _, ok := schema.Properties["webhook_secret"]; !ok {
-		t.Fatalf("settings schema missing field webhook_secret")
+	if _, ok := schema.Properties["webhook_secret"]; ok {
+		t.Fatal("settings schema must not expose SDK-generated webhook_secret")
 	}
 	required := make(map[string]bool, len(schema.Required))
 	for _, key := range schema.Required {
 		required[key] = true
 	}
-	if !required["bot_token"] || !required["webhook_secret"] {
-		t.Fatalf("required=%v must include bot_token and webhook_secret", schema.Required)
-	}
-	webhookSecret, ok := schema.Properties["webhook_secret"].(map[string]any)
-	if !ok || webhookSecret["secret"] != true {
-		t.Fatalf("webhook_secret must be marked secret: %#v", schema.Properties["webhook_secret"])
+	if !required["bot_token"] || len(required) != 1 {
+		t.Fatalf("required=%v must contain only bot_token", schema.Required)
 	}
 	// SettingsSchema must be config-driven: no Lark-specific or backend keys.
 	for _, banned := range []string{"app_id", "app_secret", "verification_token", "encrypt_key", "bot_open_id", "brand", "base_url", "callback_url"} {

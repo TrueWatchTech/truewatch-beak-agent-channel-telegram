@@ -19,6 +19,13 @@ type getMeResponse struct {
 	Description string  `json:"description,omitempty"`
 }
 
+type setWebhookResponse struct {
+	OK          bool   `json:"ok"`
+	Result      bool   `json:"result"`
+	ErrorCode   int    `json:"error_code,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
 // botUser is the Telegram User object as returned by getMe.
 type botUser struct {
 	ID        int64  `json:"id"`

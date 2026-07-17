@@ -2,6 +2,7 @@ package beaktelegram
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -30,6 +31,7 @@ const (
 	directThreadIDPrefix   = "direct_messages:"
 	credentialAttempts     = 2
 	credentialRetryDelay   = 100 * time.Millisecond
+	webhookSecretBytes     = 32
 )
 
 var ErrCredentialLogin = errors.New("telegram connector uses credential login; create channel account from CredentialSchema")
@@ -116,15 +118,16 @@ func (Connector) Metadata() sdk.ConnectorMetadata {
 		Label:       "Telegram",
 		Description: "Connect Telegram bot accounts to Beak Channel Gateway",
 		Capabilities: sdk.Capabilities{
-			LoginModes:     []string{sdk.LoginModeCredential},
-			Text:           true,
-			Media:          false,
-			GroupChat:      true,
-			DirectChat:     true,
-			Stream:         false,
-			Webhook:        true,
-			BlockStreaming: false,
-			AckModes:       []string{"reaction"},
+			LoginModes:          []string{sdk.LoginModeCredential},
+			Text:                true,
+			Media:               false,
+			GroupChat:           true,
+			DirectChat:          true,
+			Stream:              false,
+			Webhook:             true,
+			WebhookRegistration: sdk.WebhookRegistrationAutomatic,
+			BlockStreaming:      false,
+			AckModes:            []string{"reaction"},
 		},
 	}
 }
@@ -140,16 +143,9 @@ func (Connector) CredentialSchema(context.Context) sdk.CredentialSchema {
 				Description: "Bot token issued by BotFather when the bot was created (format: 123456:ABCdef...)",
 				Secret:      true,
 			},
-			"webhook_secret": {
-				Type:        "string",
-				Title:       "Webhook Secret Token",
-				Description: "Secret token sent in X-Telegram-Bot-Api-Secret-Token header for inbound webhook verification (1-256 characters, A-Z a-z 0-9 _ -)",
-				Secret:      true,
-			},
 		},
 		Required: []string{
 			"bot_token",
-			"webhook_secret",
 		},
 		AdditionalProperties: false,
 	}
@@ -159,11 +155,7 @@ func (Connector) ValidateCredential(ctx context.Context, req sdk.CredentialValid
 	credential := cloneMap(req.Credential)
 	stateMap := cloneMap(req.State)
 	secret := strings.TrimSpace(stringValue(credential["webhook_secret"]))
-	if secret == "" || !webhookSecretPattern.MatchString(secret) {
-		message := "telegram webhook_secret is required"
-		if secret != "" {
-			message = "telegram webhook_secret must be 1-256 characters using only A-Z, a-z, 0-9, _ or -"
-		}
+	if secret != "" && !webhookSecretPattern.MatchString(secret) {
 		return &sdk.CredentialValidationResult{
 			Valid:       false,
 			AccountKey:  firstString(credential["account_id"], credential["bot_id"]),
@@ -171,10 +163,12 @@ func (Connector) ValidateCredential(ctx context.Context, req sdk.CredentialValid
 			Credential:  credential,
 			State:       stateMap,
 			Metadata:    map[string]any{"platform": Platform},
-			Error:       message,
+			Error:       "telegram webhook_secret must be 1-256 characters using only A-Z, a-z, 0-9, _ or -",
 		}, nil
 	}
-	credential["webhook_secret"] = secret
+	if secret != "" {
+		credential["webhook_secret"] = secret
+	}
 	if botToken := strings.TrimSpace(stringValue(credential["bot_token"])); botToken != "" {
 		credential["bot_token"] = botToken
 	}
@@ -188,6 +182,13 @@ func (Connector) ValidateCredential(ctx context.Context, req sdk.CredentialValid
 			return credentialValidationFailure(credential, stateMap, err), nil
 		}
 		return nil, fmt.Errorf("telegram credential validation failed: %w", err)
+	}
+	if secret == "" {
+		secret, err = generateWebhookSecret()
+		if err != nil {
+			return nil, fmt.Errorf("generate telegram webhook secret: %w", err)
+		}
+		credential["webhook_secret"] = secret
 	}
 
 	// Persist bot identity to state so inbound ownership / self-echo checks
@@ -215,6 +216,14 @@ func (Connector) ValidateCredential(ctx context.Context, req sdk.CredentialValid
 			"bot_id":   info.BotID,
 		},
 	}, nil
+}
+
+func generateWebhookSecret() (string, error) {
+	raw := make([]byte, webhookSecretBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 func validateTelegramCredential(ctx context.Context, client *platform.Client) (*platform.BotInfo, error) {
@@ -270,6 +279,13 @@ func (c Connector) Start(ctx context.Context, runtime sdk.Runtime) error {
 	if runtime.Gateway == nil {
 		return fmt.Errorf("%s connector requires sdk.Runtime.Gateway", Platform)
 	}
+	accounts := runtimeAccountCandidates(runtime)
+	if len(accounts) == 0 {
+		return fmt.Errorf("%s runtime account is required", Platform)
+	}
+	if len(accounts) != 1 {
+		return fmt.Errorf("%s webhook runtime requires exactly one account", Platform)
+	}
 	if _, err := runtime.Gateway.EnsureChannel(ctx, sdk.EnsureChannelRequest{
 		WorkspaceUUID: runtime.WorkspaceUUID,
 		Platform:      Platform,
@@ -280,7 +296,7 @@ func (c Connector) Start(ctx context.Context, runtime sdk.Runtime) error {
 	}
 
 	store := newConnectorStateStore(runtime.AccountStore)
-	for _, account := range runtimeAccountCandidates(runtime) {
+	for _, account := range accounts {
 		store.seed(account)
 		accountUUID := accountKey(account)
 		if accountUUID == "" {
@@ -306,6 +322,16 @@ func (c Connector) Start(ctx context.Context, runtime sdk.Runtime) error {
 				return err
 			}
 		}
+	}
+	account := accounts[0]
+	client := platform.NewClient("", credentialStrings(account.Credential))
+	client.HTTPClient = runtime.HTTPClient
+	webhookURL := ""
+	if runtime.Webhook != nil {
+		webhookURL = runtime.Webhook.URL
+	}
+	if err := client.SetWebhook(ctx, webhookURL, strings.TrimSpace(stringValue(account.Credential["webhook_secret"]))); err != nil {
+		return fmt.Errorf("register telegram webhook: %w", err)
 	}
 	return nil
 }

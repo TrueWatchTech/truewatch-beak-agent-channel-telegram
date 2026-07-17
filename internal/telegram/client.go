@@ -147,6 +147,45 @@ func (c *Client) Validate(ctx context.Context) (*BotInfo, error) {
 	}, nil
 }
 
+// SetWebhook registers the host-owned HTTPS endpoint and secret token for
+// inbound Telegram updates. Calling it repeatedly with the same values is
+// idempotent and is expected whenever the account runtime starts.
+func (c *Client) SetWebhook(ctx context.Context, webhookURL, secret string) error {
+	if strings.TrimSpace(c.Credential["bot_token"]) == "" {
+		return fmt.Errorf("telegram bot_token is required")
+	}
+	webhookURL = strings.TrimSpace(webhookURL)
+	parsed, err := url.Parse(webhookURL)
+	if err != nil || !parsed.IsAbs() || !strings.EqualFold(parsed.Scheme, "https") || strings.TrimSpace(parsed.Host) == "" {
+		return fmt.Errorf("telegram webhook URL must be an absolute HTTPS URL")
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return fmt.Errorf("telegram webhook secret is required")
+	}
+	payload := map[string]any{
+		"url":                  webhookURL,
+		"secret_token":         secret,
+		"drop_pending_updates": false,
+		"allowed_updates": []string{
+			"message",
+			"edited_message",
+			"channel_post",
+			"edited_channel_post",
+			"business_message",
+			"edited_business_message",
+		},
+	}
+	var resp setWebhookResponse
+	if err := c.doJSONBot(ctx, http.MethodPost, "setWebhook", nil, payload, &resp); err != nil {
+		return err
+	}
+	if !resp.OK || !resp.Result {
+		return c.apiError("setWebhook", resp.ErrorCode, resp.Description)
+	}
+	return nil
+}
+
 // SendText sends one or more Telegram messages and returns the final message ID.
 // Common markdown currently degrades to plain text: forwarding CommonMark as
 // Telegram HTML/MarkdownV2 would be incorrect and can make the API reject valid

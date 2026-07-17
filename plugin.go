@@ -73,19 +73,12 @@ func (Channel) SettingsSchema() SettingsSchema {
 		AdditionalProperties: false,
 		Required: []string{
 			"bot_token",
-			"webhook_secret",
 		},
 		Properties: map[string]any{
 			"bot_token": map[string]any{
 				"type":        "string",
 				"title":       "Bot Token",
 				"description": "Bot token issued by BotFather when the bot was created (format: 123456:ABCdef...)",
-				"secret":      true,
-			},
-			"webhook_secret": map[string]any{
-				"type":        "string",
-				"title":       "Webhook Secret Token",
-				"description": "Secret token sent in X-Telegram-Bot-Api-Secret-Token header for inbound webhook verification (1-256 characters, A-Z a-z 0-9 _ -)",
 				"secret":      true,
 			},
 		},
