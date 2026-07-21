@@ -59,19 +59,19 @@ var managedAccountStateKeys = []string{
 	"bot_id",
 	"bot_username",
 	"offset",
-	"stream_connection_state",
-	"stream_connected_at",
-	"stream_disconnected_at",
-	"stream_last_activity_at",
-	"stream_last_ping_at",
-	"stream_last_pong_at",
-	"stream_last_event_at",
-	"stream_last_error",
-	"stream_last_error_at",
-	"stream_reconnect_requested_at",
-	"stream_reconnect_error",
-	"stream_reconnect_error_at",
-	"stream_session_expired",
+	sdk.RuntimeHealthKeyStreamConnectionState,
+	sdk.RuntimeHealthKeyStreamConnectedAt,
+	sdk.RuntimeHealthKeyStreamDisconnectedAt,
+	sdk.RuntimeHealthKeyStreamLastActivityAt,
+	sdk.RuntimeHealthKeyStreamLastPingAt,
+	sdk.RuntimeHealthKeyStreamLastPongAt,
+	sdk.RuntimeHealthKeyStreamLastEventAt,
+	sdk.RuntimeHealthKeyStreamLastError,
+	sdk.RuntimeHealthKeyStreamLastErrorAt,
+	sdk.RuntimeHealthKeyStreamReconnectRequestedAt,
+	sdk.RuntimeHealthKeyStreamReconnectError,
+	sdk.RuntimeHealthKeyStreamReconnectErrorAt,
+	sdk.RuntimeHealthKeyStreamSessionExpired,
 	"updated_at",
 }
 
@@ -591,10 +591,10 @@ func (c Connector) processUpdate(ctx context.Context, runtime sdk.Runtime, accou
 		return nil, err
 	}
 	now := time.Now().UTC()
-	if st.StreamConnectionState != "connected" || st.StreamConnectedAt.IsZero() {
+	if st.StreamConnectionState != sdk.RuntimeHealthStateConnected || st.StreamConnectedAt.IsZero() {
 		st.StreamConnectedAt = now
 	}
-	st.StreamConnectionState = "connected"
+	st.StreamConnectionState = sdk.RuntimeHealthStateConnected
 	st.StreamLastActivityAt = now
 	st.StreamSessionExpired = false
 	st.StreamLastError = ""

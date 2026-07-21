@@ -217,6 +217,30 @@ func (a *adapter) Acknowledge(ctx context.Context, req conformance.OutboundAck) 
 	}, nil
 }
 
+func (a *adapter) Send(ctx context.Context, req conformance.OutboundMessage) (*conformance.SendResult, error) {
+	account := sdk.ChannelAccount{
+		UUID: req.AccountUUID, Platform: "telegram",
+		Credential: map[string]any{
+			"account_id": req.AccountUUID, "bot_id": req.AccountUUID, "bot_token": "123456:ABCdef-test-token",
+		},
+	}
+	result, err := a.conn.Send(ctx, sdk.Runtime{
+		Account: account, Accounts: []sdk.ChannelAccount{account},
+		AccountStore: newFakeAccountStore(), HTTPClient: fakeTelegramClient(),
+	}, sdk.OutboundMessage{
+		WorkspaceUUID: req.WorkspaceUUID, Platform: req.Platform, AccountUUID: req.AccountUUID,
+		ChannelUUID: req.ChannelUUID, SessionUUID: req.SessionUUID, MessageUUID: req.MessageUUID,
+		ChatType: req.ChatType, ChatID: req.ChatID, ThreadID: req.ThreadID, Text: req.Text,
+		Format: req.Format, Title: req.Title, Mentions: sdkMentions(req.Mentions), MentionAll: req.MentionAll, Raw: req.Raw,
+	})
+	if result == nil {
+		return nil, err
+	}
+	return &conformance.SendResult{
+		Platform: result.Platform, AccountUUID: result.AccountUUID, MessageID: result.MessageID, Raw: result.Raw,
+	}, err
+}
+
 func convertMentions(mentions []sdk.MentionIdentity) []conformance.MentionIdentity {
 	if len(mentions) == 0 {
 		return nil
@@ -228,6 +252,17 @@ func convertMentions(mentions []sdk.MentionIdentity) []conformance.MentionIdenti
 	return out
 }
 
+func sdkMentions(mentions []conformance.MentionIdentity) []sdk.MentionIdentity {
+	if len(mentions) == 0 {
+		return nil
+	}
+	out := make([]sdk.MentionIdentity, len(mentions))
+	for i, mention := range mentions {
+		out[i] = sdk.MentionIdentity{ID: mention.ID, IDType: mention.IDType, DisplayName: mention.DisplayName}
+	}
+	return out
+}
+
 // fakeAuthClient stubs the Telegram credential-validation endpoint so
 // ValidateCredential can run without a real network call.
 func fakeTelegramClient() *http.Client {
@@ -235,6 +270,8 @@ func fakeTelegramClient() *http.Client {
 		body := `{"ok":true,"result":{"id":123456,"is_bot":true,"first_name":"Test Bot","username":"testbot"}}`
 		if strings.HasSuffix(req.URL.Path, "/setMessageReaction") {
 			body = `{"ok":true,"result":true}`
+		} else if strings.HasSuffix(req.URL.Path, "/sendMessage") {
+			body = `{"ok":true,"result":{"message_id":301,"date":1720000000,"chat":{"id":-200,"type":"supergroup"},"text":"Telegram outbound"}}`
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
