@@ -29,6 +29,9 @@ func TestConnectorMetadata(t *testing.T) {
 	if !meta.Capabilities.Text {
 		t.Fatal("expected text capability")
 	}
+	if !meta.Capabilities.Media || len(meta.Capabilities.MediaKinds) != 5 {
+		t.Fatalf("expected image/file/audio/video/sticker media capabilities, got %+v", meta.Capabilities)
+	}
 }
 
 func TestConnectorCredentialSchema(t *testing.T) {

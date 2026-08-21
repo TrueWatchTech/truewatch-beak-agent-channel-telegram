@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,6 +57,51 @@ func TestClientValidate(t *testing.T) {
 	}
 	if info.DisplayName != "@testbot" {
 		t.Fatalf("DisplayName=%q want @testbot", info.DisplayName)
+	}
+}
+
+func TestClientSendAttachment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(path, []byte("report"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	var method string
+	var payload string
+	httpClient := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		method = req.URL.Path
+		if err := req.ParseMultipartForm(1 << 20); err != nil {
+			return nil, err
+		}
+		file, _, err := req.FormFile("document")
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		body, err := io.ReadAll(file)
+		if err != nil {
+			return nil, err
+		}
+		payload = string(body)
+		return jsonResp(`{"ok":true,"result":{"message_id":991}}`)
+	})}
+	client := NewClient("https://telegram.test", map[string]string{"bot_token": "123:token"})
+	client.HTTPClient = httpClient
+	messageID, err := client.SendAttachment(context.Background(), TextRoute{ChatID: "-20", MessageThreadID: "8"}, sdk.MediaAttachment{
+		ID: "asset-1", Kind: sdk.MediaKindFile, Source: sdk.MediaSourcePath, Path: path, FileName: "report.txt",
+	})
+	if err != nil {
+		t.Fatalf("SendAttachment: %v", err)
+	}
+	if messageID != "991" || method != "/bot123:token/sendDocument" || payload != "report" {
+		t.Fatalf("message_id=%q method=%q payload=%q", messageID, method, payload)
+	}
+}
+
+func TestBlockedMediaHost(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "169.254.169.254", "10.0.0.1"} {
+		if !blockedMediaHost(host) {
+			t.Fatalf("host %q should be blocked", host)
+		}
 	}
 }
 

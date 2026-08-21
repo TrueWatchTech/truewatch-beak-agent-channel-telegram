@@ -46,6 +46,17 @@ type sendMessageResult struct {
 	MessageID int64 `json:"message_id"`
 }
 
+type getFileResponse struct {
+	OK          bool     `json:"ok"`
+	Result      fileInfo `json:"result"`
+	ErrorCode   int      `json:"error_code,omitempty"`
+	Description string   `json:"description,omitempty"`
+}
+
+type fileInfo struct {
+	FilePath string `json:"file_path"`
+}
+
 // Update is the Telegram Update object delivered to the webhook.
 type Update struct {
 	UpdateID              int64    `json:"update_id"`

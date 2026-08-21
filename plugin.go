@@ -1,6 +1,10 @@
 package beaktelegram
 
-import "context"
+import (
+	"context"
+
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-telegram/sdk"
+)
 
 type API interface {
 	RegisterChannel(Channel) error
@@ -22,6 +26,7 @@ type Capabilities struct {
 	GroupChat      bool
 	Text           bool
 	Media          bool
+	MediaKinds     []string
 	BlockStreaming bool
 }
 
@@ -62,7 +67,8 @@ func (Channel) Capabilities() Capabilities {
 		DirectChat:     true,
 		GroupChat:      true,
 		Text:           true,
-		Media:          false,
+		Media:          true,
+		MediaKinds:     []string{sdk.MediaKindImage, sdk.MediaKindFile, sdk.MediaKindAudio, sdk.MediaKindVideo, sdk.MediaKindSticker},
 		BlockStreaming: false,
 	}
 }

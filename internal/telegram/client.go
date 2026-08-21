@@ -7,8 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -196,6 +200,251 @@ func (c *Client) SendText(ctx context.Context, chatID, threadID, text, format st
 		return "", err
 	}
 	return ids[len(ids)-1], nil
+}
+
+// DownloadFile resolves a Telegram file_id and copies it to a private
+// temporary file. The cleanup function must be called after the host imports
+// the attachment.
+func (c *Client) DownloadFile(ctx context.Context, fileID string) (string, func(), error) {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return "", nil, fmt.Errorf("telegram file_id is required")
+	}
+	var resp getFileResponse
+	if err := c.doJSONBot(ctx, http.MethodPost, "getFile", nil, map[string]any{"file_id": fileID}, &resp); err != nil {
+		return "", nil, err
+	}
+	if !resp.OK || strings.TrimSpace(resp.Result.FilePath) == "" {
+		return "", nil, c.apiError("getFile", resp.ErrorCode, resp.Description)
+	}
+	token := strings.TrimSpace(c.Credential["bot_token"])
+	if token == "" {
+		return "", nil, fmt.Errorf("telegram bot_token is required")
+	}
+	endpoint := strings.TrimRight(c.BaseURL, "/") + "/file/bot" + token + "/" + strings.TrimLeft(resp.Result.FilePath, "/")
+	requestCtx, cancel := context.WithTimeout(ctx, c.requestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("telegram file request build failed: %w", err)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("telegram file download failed: status=%d", response.StatusCode)
+	}
+	file, err := os.CreateTemp("", "beak-telegram-inbound-*")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	written, err := io.Copy(file, io.LimitReader(response.Body, 32<<20+1))
+	if err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if written > 32<<20 {
+		_ = file.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("telegram file download exceeds 32 MiB limit")
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
+}
+
+// SendAttachment uploads one local attachment with the Telegram-native send
+// method selected from its common Kind.
+func (c *Client) SendAttachment(ctx context.Context, route TextRoute, attachment sdk.MediaAttachment) (string, error) {
+	if err := sdk.ValidateMediaAttachment(attachment); err != nil {
+		return "", err
+	}
+	path, cleanup, err := c.materializeOutboundAttachment(ctx, attachment)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	method, field, err := telegramMediaMethod(attachment.Kind)
+	if err != nil {
+		return "", err
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("chat_id", route.ChatID); err != nil {
+		return "", err
+	}
+	if route.MessageThreadID != "" {
+		_ = writer.WriteField("message_thread_id", route.MessageThreadID)
+	}
+	if route.DirectMessagesTopicID != "" {
+		_ = writer.WriteField("direct_messages_topic_id", route.DirectMessagesTopicID)
+	}
+	if route.BusinessConnectionID != "" {
+		_ = writer.WriteField("business_connection_id", route.BusinessConnectionID)
+	}
+	if strings.TrimSpace(attachment.AltText) != "" {
+		_ = writer.WriteField("caption", attachment.AltText)
+	}
+	part, err := writer.CreateFormFile(field, filepath.Base(firstNonEmpty(attachment.FileName, path)))
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, c.requestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.botURL(method, nil), &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxAPIResponseBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", c.apiError(method, response.StatusCode, sanitizeBotToken(string(data), c.Credential["bot_token"]))
+	}
+	var result sendMessageResponse
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", err
+	}
+	if !result.OK {
+		return "", c.apiError(method, result.ErrorCode, result.Description)
+	}
+	if result.Result.MessageID <= 0 {
+		return "", fmt.Errorf("telegram %s returned an invalid message_id", method)
+	}
+	return strconv.FormatInt(result.Result.MessageID, 10), nil
+}
+
+func (c *Client) materializeOutboundAttachment(ctx context.Context, attachment sdk.MediaAttachment) (string, func(), error) {
+	if path := strings.TrimSpace(attachment.Path); path != "" {
+		return path, func() {}, nil
+	}
+	if strings.TrimSpace(attachment.URL) == "" {
+		return "", nil, fmt.Errorf("telegram outbound attachment requires a local path or HTTP URL")
+	}
+	parsed, err := url.Parse(strings.TrimSpace(attachment.URL))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", nil, fmt.Errorf("telegram attachment URL must be absolute HTTP or HTTPS")
+	}
+	if blockedMediaHost(parsed.Hostname()) {
+		return "", nil, fmt.Errorf("telegram attachment URL host is not allowed")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, c.requestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return "", nil, err
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("telegram attachment URL download failed: status=%d", response.StatusCode)
+	}
+	file, err := os.CreateTemp("", "beak-telegram-outbound-*")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	written, err := io.Copy(file, io.LimitReader(response.Body, 32<<20+1))
+	if err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if written > 32<<20 {
+		_ = file.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("telegram attachment URL exceeds 32 MiB limit")
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
+}
+
+func blockedMediaHost(host string) bool {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if host == "" || strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	}
+	return false
+}
+
+func telegramMediaMethod(kind string) (method, field string, err error) {
+	switch strings.TrimSpace(kind) {
+	case sdk.MediaKindImage:
+		return "sendPhoto", "photo", nil
+	case sdk.MediaKindFile:
+		return "sendDocument", "document", nil
+	case sdk.MediaKindAudio:
+		return "sendAudio", "audio", nil
+	case sdk.MediaKindVideo:
+		return "sendVideo", "video", nil
+	case sdk.MediaKindSticker:
+		return "sendSticker", "sticker", nil
+	default:
+		return "", "", fmt.Errorf("telegram unsupported attachment kind %q", kind)
+	}
+}
+
+func (c *Client) requestTimeout() time.Duration {
+	if c.RequestTimeout > 0 {
+		return c.RequestTimeout
+	}
+	return defaultRequestTimeout
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // SendTextParts is SendText with all platform message IDs exposed for the

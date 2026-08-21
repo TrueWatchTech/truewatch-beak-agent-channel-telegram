@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -54,7 +55,17 @@ func TestInbound_PureBotMentionIsFollowUp(t *testing.T) {
 }
 
 func TestInbound_CaptionedPhoto(t *testing.T) {
-	res := inboundJSON(t, map[string]any{
+	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/getFile"):
+			return testJSONResponseObj(map[string]any{"ok": true, "result": map[string]any{"file_path": "photos/photo-1.jpg"}})
+		case strings.Contains(req.URL.Path, "/file/bot"):
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("jpeg-bytes"))}, nil
+		default:
+			return nil, fmt.Errorf("unexpected telegram request %s", req.URL.Path)
+		}
+	})}
+	res := inboundJSONWithHTTPClient(t, client, map[string]any{
 		"update_id": 203,
 		"message": map[string]any{
 			"message_id": 303,
@@ -69,6 +80,33 @@ func TestInbound_CaptionedPhoto(t *testing.T) {
 	}
 	if res.Inbound.Raw["message_type"] != "photo" {
 		t.Fatalf("message_type=%#v", res.Inbound.Raw["message_type"])
+	}
+	if len(res.Inbound.Attachments) != 1 || res.Inbound.Attachments[0].Kind != sdk.MediaKindImage || res.Inbound.Attachments[0].PlatformResourceID != "photo-1" {
+		t.Fatalf("photo attachment=%#v", res.Inbound.Attachments)
+	}
+}
+
+func TestInbound_MediaDownloadFailureKeepsMessage(t *testing.T) {
+	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(req.URL.Path, "/getFile") {
+			return nil, errors.New("getFile unavailable")
+		}
+		return nil, fmt.Errorf("unexpected telegram request %s", req.URL.Path)
+	})}
+	res := inboundJSONWithHTTPClient(t, client, map[string]any{
+		"update_id": 209,
+		"message": map[string]any{
+			"message_id": 309,
+			"from":       map[string]any{"id": 999, "first_name": "Alice"},
+			"chat":       map[string]any{"id": -200, "type": "group"},
+			"photo":      []map[string]any{{"file_id": "photo-failure", "width": 10, "height": 10}},
+		},
+	})
+	if res.Inbound == nil || res.Inbound.Text != "[图片下载失败]" || len(res.Inbound.Attachments) != 0 {
+		t.Fatalf("download failure normalization=%#v", res.Inbound)
+	}
+	if _, ok := res.Inbound.Raw["attachment_errors"]; !ok {
+		t.Fatalf("attachment error missing from raw=%#v", res.Inbound.Raw)
 	}
 }
 
@@ -491,17 +529,18 @@ func TestWebhookErrorsAreStructured(t *testing.T) {
 }
 
 func inboundJSON(t *testing.T, update map[string]any) *EventResult {
+	return inboundJSONWithHTTPClient(t, nil, update)
+}
+
+func inboundJSONWithHTTPClient(t *testing.T, client *http.Client, update map[string]any) *EventResult {
 	t.Helper()
 	body, err := json.Marshal(update)
 	if err != nil {
 		t.Fatalf("marshal update: %v", err)
 	}
-	result, err := (Connector{}).HandleWebhook(
-		context.Background(),
-		makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore()),
-		sdkAccount("acct-1"),
-		body,
-	)
+	runtime := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore())
+	runtime.HTTPClient = client
+	result, err := (Connector{}).HandleWebhook(context.Background(), runtime, sdkAccount("acct-1"), body)
 	if err != nil {
 		t.Fatalf("handle webhook: %v", err)
 	}

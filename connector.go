@@ -120,7 +120,8 @@ func (Connector) Metadata() sdk.ConnectorMetadata {
 		Capabilities: sdk.Capabilities{
 			LoginModes:          []string{sdk.LoginModeCredential},
 			Text:                true,
-			Media:               false,
+			Media:               true,
+			MediaKinds:          []string{sdk.MediaKindImage, sdk.MediaKindFile, sdk.MediaKindAudio, sdk.MediaKindVideo, sdk.MediaKindSticker},
 			GroupChat:           true,
 			DirectChat:          true,
 			Stream:              false,
@@ -348,8 +349,8 @@ func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbound
 	if strings.TrimSpace(req.ChatID) == "" {
 		return nil, fmt.Errorf("%s outbound chat_id is required", Platform)
 	}
-	if strings.TrimSpace(req.Text) == "" {
-		return nil, fmt.Errorf("%s outbound text is required", Platform)
+	if strings.TrimSpace(req.Text) == "" && len(req.Attachments) == 0 {
+		return nil, fmt.Errorf("%s outbound text or attachments are required", Platform)
 	}
 
 	client := platform.NewClient("", credentialStrings(account.Credential))
@@ -368,9 +369,12 @@ func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbound
 	if directTopicID == "" {
 		directTopicID = threadDirectTopicID
 	}
-	parts, err := platform.PrepareTextParts(req.Text, req.Format, req.Mentions, req.MentionAll)
-	if err != nil {
-		return nil, err
+	var parts []string
+	if strings.TrimSpace(req.Text) != "" {
+		parts, err = platform.PrepareTextParts(req.Text, req.Format, req.Mentions, req.MentionAll)
+		if err != nil {
+			return nil, err
+		}
 	}
 	route := platform.TextRoute{
 		ChatID:                chatID,
@@ -385,18 +389,58 @@ func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbound
 		return nil, fmt.Errorf("telegram multipart outbound requires sdk.Runtime.AccountStore for retry-safe delivery")
 	}
 
-	messageIDs, resumed, err := sendTelegramParts(ctx, runtime, account, req.MessageUUID, route, parts, client)
-	if err != nil {
-		return nil, err
+	messageIDs := make([]string, 0, len(parts)+len(req.Attachments))
+	resumed := false
+	if len(parts) > 0 {
+		textIDs, textResumed, sendErr := sendTelegramParts(ctx, runtime, account, req.MessageUUID, route, parts, client)
+		if sendErr != nil {
+			return nil, sendErr
+		}
+		messageIDs = append(messageIDs, textIDs...)
+		resumed = textResumed
+	}
+	attachmentResults := make([]sdk.AttachmentSendResult, 0, len(req.Attachments))
+	var attachmentErrors []string
+	for _, attachment := range req.Attachments {
+		result := sdk.AttachmentSendResult{AttachmentID: attachment.ID, Kind: attachment.Kind}
+		if err := sdk.ValidateMediaAttachment(attachment); err != nil {
+			result.Status = sdk.AttachmentStatusFailed
+			result.Error = err.Error()
+			attachmentResults = append(attachmentResults, result)
+			attachmentErrors = append(attachmentErrors, err.Error())
+			continue
+		}
+		messageID, sendErr := client.SendAttachment(ctx, route, attachment)
+		if sendErr != nil {
+			result.Status = sdk.AttachmentStatusFailed
+			result.Error = sendErr.Error()
+			attachmentResults = append(attachmentResults, result)
+			attachmentErrors = append(attachmentErrors, sendErr.Error())
+			continue
+		}
+		result.Status = sdk.AttachmentStatusSent
+		result.MessageID = messageID
+		attachmentResults = append(attachmentResults, result)
+		messageIDs = append(messageIDs, messageID)
+	}
+	if len(messageIDs) == 0 {
+		if len(attachmentErrors) > 0 {
+			return nil, fmt.Errorf("%s outbound attachments failed: %s", Platform, strings.Join(attachmentErrors, "; "))
+		}
+		return nil, fmt.Errorf("%s outbound produced no messages", Platform)
 	}
 	result := &sdk.SendResult{
-		Platform:    Platform,
-		AccountUUID: accountUUID,
-		MessageID:   messageIDs[len(messageIDs)-1],
-		Raw:         map[string]any{"message_ids": messageIDs},
+		Platform:          Platform,
+		AccountUUID:       accountUUID,
+		MessageID:         messageIDs[len(messageIDs)-1],
+		AttachmentResults: attachmentResults,
+		Raw:               map[string]any{"message_ids": messageIDs},
 	}
 	if resumed {
 		result.Raw["resumed"] = true
+	}
+	if len(attachmentErrors) > 0 {
+		result.Raw["attachment_errors"] = attachmentErrors
 	}
 	return result, nil
 }
@@ -599,6 +643,8 @@ func (c Connector) processUpdate(ctx context.Context, runtime sdk.Runtime, accou
 	st.StreamSessionExpired = false
 	st.StreamLastError = ""
 	st.StreamLastErrorAt = time.Time{}
+	mediaClient := platform.NewClient("", credentialStrings(account.Credential))
+	mediaClient.HTTPClient = runtime.HTTPClient
 
 	ignored := func(eventType, reason, sessionUUID string) (*EventResult, error) {
 		if err := store.SaveAccount(ctx, st); err != nil {
@@ -641,7 +687,7 @@ func (c Connector) processUpdate(ctx context.Context, runtime sdk.Runtime, accou
 	}
 
 	rawText, entities, messageType := telegramMessageContent(msg)
-	if strings.TrimSpace(rawText) == "" && len(entities) == 0 {
+	if strings.TrimSpace(rawText) == "" && len(entities) == 0 && !telegramMessageHasMedia(msg) {
 		return ignored(eventType, "unsupported_message_type", "")
 	}
 
@@ -671,7 +717,17 @@ func (c Connector) processUpdate(ctx context.Context, runtime sdk.Runtime, accou
 	botUsername := strings.TrimPrefix(firstString(st.BotUsername, account.State["bot_username"], account.Credential["bot_username"]), "@")
 	mentions, mentionedMe, botMentionRanges := telegramMentionAnalysis(rawText, entities, botID, botUsername)
 	text := strings.TrimSpace(stripUTF16Ranges(rawText, botMentionRanges))
-	if text == "" && !mentionedMe {
+	attachments, cleanupAttachments, attachmentErr := downloadTelegramAttachments(ctx, mediaClient, msg)
+	if cleanupAttachments != nil {
+		defer cleanupAttachments()
+	}
+	if text == "" && len(attachments) > 0 {
+		text = telegramAttachmentPlaceholder(attachments)
+	}
+	if text == "" && attachmentErr != nil && telegramMessageHasMedia(msg) {
+		text = telegramAttachmentFailurePlaceholder(msg)
+	}
+	if text == "" && !mentionedMe && len(attachments) == 0 {
 		return ignored(eventType, "unsupported_message_type", "")
 	}
 
@@ -706,6 +762,7 @@ func (c Connector) processUpdate(ctx context.Context, runtime sdk.Runtime, accou
 		SenderDisplayName: senderDisplayName,
 		MessageID:         messageIDStr,
 		Text:              text,
+		Attachments:       attachments,
 		ReferencedMessage: referenced,
 		DedupeKey:         dedupeKey,
 		Mentions:          mentions,
@@ -727,6 +784,9 @@ func (c Connector) processUpdate(ctx context.Context, runtime sdk.Runtime, accou
 			"date":                     msg.Date,
 			"mentions":                 mentions,
 		},
+	}
+	if attachmentErr != nil {
+		inbound.Raw["attachment_errors"] = []string{attachmentErr.Error()}
 	}
 
 	// Ensure the chat session (identity includes account uuid, so two bots
@@ -764,6 +824,7 @@ func (c Connector) processUpdate(ctx context.Context, runtime sdk.Runtime, accou
 		SenderID:      sdk.IMPersonParticipantID(Platform, chatType, chatID, senderID),
 		Content:       text,
 		DedupeKey:     dedupeKey,
+		Attachments:   inbound.Attachments,
 		Metadata: map[string]any{
 			"source":                            Platform,
 			"platform":                          Platform,
@@ -841,6 +902,124 @@ func telegramMessageContent(message *platform.Message) (string, []platform.Messa
 		return message.Text, message.Entities, "text"
 	}
 	return message.Caption, message.CaptionEntities, telegramMessageType(message)
+}
+
+func telegramMessageHasMedia(message *platform.Message) bool {
+	return message != nil && (len(message.Photo) > 0 || message.Document != nil || message.Video != nil || message.Audio != nil || message.Voice != nil || message.Animation != nil || message.Sticker != nil)
+}
+
+func downloadTelegramAttachments(ctx context.Context, client *platform.Client, message *platform.Message) ([]sdk.MediaAttachment, func(), error) {
+	if !telegramMessageHasMedia(message) {
+		return nil, nil, nil
+	}
+	attachments := make([]sdk.MediaAttachment, 0, 4)
+	cleanups := make([]func(), 0, 4)
+	cleanup := func() {
+		for index := len(cleanups) - 1; index >= 0; index-- {
+			if cleanups[index] != nil {
+				cleanups[index]()
+			}
+		}
+	}
+	add := func(fileID, kind, name, contentType string) error {
+		if strings.TrimSpace(fileID) == "" {
+			return nil
+		}
+		path, remove, err := client.DownloadFile(ctx, fileID)
+		if err != nil {
+			return err
+		}
+		cleanups = append(cleanups, remove)
+		attachments = append(attachments, sdk.MediaAttachment{ID: fileID, Kind: kind, Source: sdk.MediaSourcePath, Path: path, ContentType: contentType, FileName: name, PlatformResourceID: fileID})
+		return nil
+	}
+	if len(message.Photo) > 0 {
+		photo := message.Photo[len(message.Photo)-1]
+		if err := add(photo.FileID, sdk.MediaKindImage, "photo.jpg", "image/jpeg"); err != nil {
+			return attachments, cleanup, err
+		}
+	}
+	if message.Document != nil {
+		if err := add(message.Document.FileID, sdk.MediaKindFile, message.Document.FileName, message.Document.MimeType); err != nil {
+			return attachments, cleanup, err
+		}
+	}
+	if message.Video != nil {
+		if err := add(message.Video.FileID, sdk.MediaKindVideo, message.Video.FileName, message.Video.MimeType); err != nil {
+			return attachments, cleanup, err
+		}
+	}
+	if message.Audio != nil {
+		if err := add(message.Audio.FileID, sdk.MediaKindAudio, message.Audio.FileName, message.Audio.MimeType); err != nil {
+			return attachments, cleanup, err
+		}
+	}
+	if message.Voice != nil {
+		if err := add(message.Voice.FileID, sdk.MediaKindAudio, "voice.ogg", message.Voice.MimeType); err != nil {
+			return attachments, cleanup, err
+		}
+	}
+	if message.Animation != nil {
+		if err := add(message.Animation.FileID, sdk.MediaKindVideo, message.Animation.FileName, message.Animation.MimeType); err != nil {
+			return attachments, cleanup, err
+		}
+	}
+	if message.Sticker != nil {
+		if err := add(message.Sticker.FileID, sdk.MediaKindSticker, message.Sticker.FileName, message.Sticker.MimeType); err != nil {
+			return attachments, cleanup, err
+		}
+	}
+	return attachments, cleanup, nil
+}
+
+func telegramAttachmentPlaceholder(attachments []sdk.MediaAttachment) string {
+	labels := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		label := "附件"
+		switch attachment.Kind {
+		case sdk.MediaKindImage:
+			label = "图片"
+		case sdk.MediaKindFile:
+			label = "文件"
+		case sdk.MediaKindAudio:
+			label = "音频"
+		case sdk.MediaKindVideo:
+			label = "视频"
+		case sdk.MediaKindSticker:
+			label = "贴纸"
+		}
+		if strings.TrimSpace(attachment.FileName) != "" && attachment.Kind == sdk.MediaKindFile {
+			label += ": " + attachment.FileName
+		}
+		labels = append(labels, "["+label+"]")
+	}
+	return strings.Join(labels, " ")
+}
+
+func telegramAttachmentFailurePlaceholder(message *platform.Message) string {
+	if message == nil {
+		return "[附件下载失败]"
+	}
+	labels := make([]string, 0, 2)
+	if len(message.Photo) > 0 {
+		labels = append(labels, "[图片下载失败]")
+	}
+	if message.Document != nil {
+		labels = append(labels, "[文件下载失败]")
+	}
+	if message.Audio != nil || message.Voice != nil {
+		labels = append(labels, "[音频下载失败]")
+	}
+	if message.Video != nil || message.Animation != nil {
+		labels = append(labels, "[视频下载失败]")
+	}
+	if message.Sticker != nil {
+		labels = append(labels, "[贴纸下载失败]")
+	}
+	if len(labels) == 0 {
+		return "[附件下载失败]"
+	}
+	return strings.Join(labels, " ")
 }
 
 func telegramMessageType(message *platform.Message) string {
