@@ -118,6 +118,7 @@ func (Connector) Metadata() sdk.ConnectorMetadata {
 		Label:       "Telegram",
 		Description: "Connect Telegram bot accounts to Beak Channel Gateway",
 		Capabilities: sdk.Capabilities{
+			Interactions:        sdk.InteractionCapabilities{ToolApproval: true, PlanConfirmation: true, Update: "always"},
 			LoginModes:          []string{sdk.LoginModeCredential},
 			Text:                true,
 			Media:               true,
@@ -338,6 +339,9 @@ func (c Connector) Start(ctx context.Context, runtime sdk.Runtime) error {
 }
 
 func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.OutboundMessage) (*sdk.SendResult, error) {
+	if req.Interaction != nil {
+		return sendTelegramInteraction(ctx, runtime, req)
+	}
 	account, err := selectRuntimeAccount(runtime, req.AccountUUID)
 	if err != nil {
 		return nil, err
@@ -607,6 +611,9 @@ func (c Connector) HandleWebhookRequest(ctx context.Context, runtime sdk.Runtime
 // inbound flow. Separated from HandleWebhookRequest so tests can drive the
 // inbound logic directly.
 func (c Connector) HandleWebhook(ctx context.Context, runtime sdk.Runtime, account sdk.ChannelAccount, body []byte) (*EventResult, error) {
+	if handled, err := handleTelegramInteraction(ctx, runtime, account, body); handled || err != nil {
+		return &EventResult{Type: "callback_query"}, err
+	}
 	var update platform.Update
 	if err := json.Unmarshal(body, &update); err != nil {
 		return nil, webhookError(http.StatusBadRequest, "invalid_request_body", fmt.Errorf("%s decode update: %w", Platform, err))

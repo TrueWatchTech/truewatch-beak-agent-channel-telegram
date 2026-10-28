@@ -172,6 +172,7 @@ func (c *Client) SetWebhook(ctx context.Context, webhookURL, secret string) erro
 		"secret_token":         secret,
 		"drop_pending_updates": false,
 		"allowed_updates": []string{
+			"callback_query",
 			"message",
 			"edited_message",
 			"channel_post",
