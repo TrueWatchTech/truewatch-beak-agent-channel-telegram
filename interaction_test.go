@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/TrueWatchTech/truewatch-beak-agent-channel-telegram/sdk"
 )
@@ -97,10 +96,11 @@ func TestTelegramInteractionPreservesBusinessAndTopicIdentity(t *testing.T) {
 	}
 }
 
-func TestTelegramLongPlanUsesAuthenticatedWebEntry(t *testing.T) {
+// The deprecated field must never restore a browser decision path.
+func TestTelegramIgnoresWebURLAndRejectsOversizedCards(t *testing.T) {
 	account := sdkAccount("acct-1")
 	runtime := makeRuntime(&interactionTestGateway{fakeSDKGateway: &fakeSDKGateway{}}, newFakeSDKAccountStore(), account)
-	card := &sdk.InteractionCard{RequestID: "plan_123", Revision: 1, Kind: "plan_confirmation", State: "pending", Title: "计划", Summary: strings.Repeat("中文😀", 2500), WebURL: "https://console.example.test/agents/agent/workspace?session_uuid=session", Actions: []sdk.InteractionButton{{ID: "approve", Label: "批准"}}}
+	card := &sdk.InteractionCard{RequestID: "approval_url", Kind: "tool_approval", State: "pending", Title: "Approval", Summary: "Run operation", WebURL: "https://example.test/approval", Actions: []sdk.InteractionButton{{ID: "approve", Label: "Approve"}}}
 	calls := 0
 	runtime.HTTPClient = &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
@@ -108,16 +108,9 @@ func TestTelegramLongPlanUsesAuthenticatedWebEntry(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if utf8.RuneCountInString(payload["text"].(string)) > 4096 {
-			t.Fatal("text exceeds platform limit")
-		}
 		rows := payload["reply_markup"].(map[string]any)["inline_keyboard"].([]any)
-		if len(rows) != 1 {
-			t.Fatal("truncated plan must be reviewed on Web before deciding")
-		}
-		button := rows[0].([]any)[0].(map[string]any)
-		if button["url"] != card.WebURL || button["callback_data"] != nil {
-			t.Fatal("missing Web review entry")
+		if len(rows) != 1 || rows[0].([]any)[0].(map[string]any)["url"] != nil {
+			t.Fatal("WebURL generated a browser button")
 		}
 		return testJSONResponseObj(map[string]any{"ok": true, "result": map[string]any{"message_id": 321}})
 	})}
@@ -125,11 +118,14 @@ func TestTelegramLongPlanUsesAuthenticatedWebEntry(t *testing.T) {
 	if _, err := NewConnector().Send(context.Background(), runtime, req); err != nil {
 		t.Fatal(err)
 	}
-	card.WebURL = ""
-	if _, err := NewConnector().Send(context.Background(), runtime, req); err == nil {
-		t.Fatal("oversized plan silently truncated without a review entry")
+	card.Summary = strings.Repeat("😀", 2100)
+	for _, url := range []string{"https://example.test/approval", ""} {
+		card.WebURL = url
+		if _, err := NewConnector().Send(context.Background(), runtime, req); err == nil {
+			t.Fatal("oversized card did not fail")
+		}
 	}
 	if calls != 1 {
-		t.Fatal("invalid oversized payload reached Telegram")
+		t.Fatalf("oversized card reached Telegram: %d calls", calls)
 	}
 }

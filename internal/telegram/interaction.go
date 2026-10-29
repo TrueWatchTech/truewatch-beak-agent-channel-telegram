@@ -19,13 +19,7 @@ func (c *Client) SendInteraction(ctx context.Context, route TextRoute, card sdk.
 	}
 	text := card.Title + "\n" + card.Summary
 	if len(utf16.Encode([]rune(text))) > 4096 {
-		if card.WebURL == "" {
-			return "", fmt.Errorf("long Telegram interaction requires an authenticated Web entry")
-		}
-		// Do not approve a plan from a truncated preview. The protected Web
-		// page presents the complete content and owns the resulting decision.
-		text = string([]rune(text)[:1800]) + "\n…内容过长，请打开网页查看并处理。"
-		card.Actions = nil
+		return "", fmt.Errorf("telegram interaction exceeds 4096 UTF-16 code units")
 	}
 	rows := make([][]map[string]string, 0, len(card.Actions))
 	for _, button := range card.Actions {
@@ -34,9 +28,6 @@ func (c *Client) SendInteraction(ctx context.Context, route TextRoute, card sdk.
 			return "", err
 		}
 		rows = append(rows, []map[string]string{{"text": button.Label, "callback_data": token}})
-	}
-	if card.WebURL != "" {
-		rows = append(rows, []map[string]string{{"text": "Open", "url": card.WebURL}})
 	}
 	payload := map[string]any{"chat_id": route.ChatID, "text": text, "reply_markup": map[string]any{"inline_keyboard": rows}}
 	method := "sendMessage"
